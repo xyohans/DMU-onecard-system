@@ -32,6 +32,12 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow the app to use the camera to scan meal cards"
+        }
       ]
     ],
     "experiments": {
