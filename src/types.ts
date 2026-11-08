@@ -20,6 +20,7 @@ export type ScanStatus =
   | 'CLOSED'
   | 'NOT_FOUND'
   | 'INACTIVE'
+  | 'WRONG_GATE'
   | 'BAD_REQUEST'
   | 'ERROR'
   | 'NETWORK';
@@ -29,6 +30,7 @@ export type ScanResult = {
   student?: Student;
   meal?: Meal;
   firstScan?: { scanned_at: string } | null;
+  assigned?: { cafeteria_id: number | null; gate: number | null };
 };
 
 export type MealWindow = {

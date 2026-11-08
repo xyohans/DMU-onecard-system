@@ -1,11 +1,12 @@
-import db from '../config/db.js';
+import db from './db.js';
 
 const TZ = 'Africa/Addis_Ababa';
 
+// today's date, time and weekday in Ethiopia time (the phone's clock is never used here)
 function getEthiopiaNow() {
   const d = new Date();
-  const date = d.toLocaleDateString('en-CA', { timeZone: TZ });                    // YYYY-MM-DD
-  const time = d.toLocaleTimeString('en-GB', { timeZone: TZ, hourCycle: 'h23' });  // HH:MM:SS
+  const date = d.toLocaleDateString('en-CA', { timeZone: TZ });                   // YYYY-MM-DD
+  const time = d.toLocaleTimeString('en-GB', { timeZone: TZ, hourCycle: 'h23' }); // HH:MM:SS
   const wd = d.toLocaleDateString('en-US', { timeZone: TZ, weekday: 'short' });
   const day = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[wd];
   return { date, time, day };
@@ -26,10 +27,11 @@ async function getMenu(day, mealType) {
   return rows[0]?.menu_name ?? null;
 }
 
+// which meal is open right now? null means closed
 async function getCurrentMeal() {
   const { date, time, day } = getEthiopiaNow();
   const schedule = await getSchedule();
-  const win = schedule.find(w => w.start_time <= time && time <= w.end_time);
+  const win = schedule.find((w) => w.start_time <= time && time <= w.end_time);
   if (!win) return null;
 
   return {
@@ -46,4 +48,3 @@ function cleanId(value) {
 }
 
 export { cleanId, getCurrentMeal, getEthiopiaNow, getMenu, getSchedule };
-
