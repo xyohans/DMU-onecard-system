@@ -1,15 +1,30 @@
 import * as SQLite from 'expo-sqlite';
+import * as SecureStore from 'expo-secure-store';
 import { API } from './config';
 import { fetchT } from './net';
 import type { MealType, ScanResult } from './types';
 
 export type GateConfig = { cafeteria: number; gate: number };
+export type StaffSession = {
+  accessToken: string;
+  id: number;
+  email: string;
+  full_name: string;
+  cafeteria_id: number;
+  gate: number;
+};
 
-type SyncData = {
+export type SyncData = {
   students: { id: string; full_name: string; department: string | null; is_active: number }[];
   windows: { meal_type: string; start_time: string; end_time: string }[];
   menu: { day_of_week: number; meal_type: string; menu_name: string }[];
   logs: { student_id: string; meal_type: string; meal_date: string; scanned_at: string }[];
+};
+
+type LoginResponse = {
+  token: string;
+  staff: Omit<StaffSession, 'accessToken'>;
+  data: SyncData;
 };
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -63,6 +78,94 @@ export async function getGate(): Promise<GateConfig | null> {
   return { cafeteria: Number(c.value), gate: Number(g.value) };
 }
 
+export async function loadSession(): Promise<StaffSession | null> {
+  const raw = await SecureStore.getItemAsync('staff_session');
+  if (!raw) return null;
+  const session = JSON.parse(raw) as StaffSession;
+  if (
+    typeof session.accessToken !== 'string' ||
+    !Number.isInteger(session.cafeteria_id) ||
+    !Number.isInteger(session.gate)
+  ) {
+    throw new Error('Saved sign-in data is invalid. Sign in again.');
+  }
+  return session;
+}
+
+export async function saveSession(session: StaffSession): Promise<void> {
+  await SecureStore.setItemAsync('staff_session', JSON.stringify(session));
+}
+
+export async function authenticateStaff(
+  email: string,
+  password: string
+): Promise<
+  | { ok: true; session: StaffSession; data: SyncData }
+  | { ok: false; reason: 'network' | 'invalid' | 'inactive' | 'occupied' | 'unassigned' | 'error' }
+> {
+  try {
+    const res = await fetchT(
+      `${API}/auth/login`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      },
+      15000
+    );
+    if (res.status === 401) return { ok: false, reason: 'invalid' };
+    if (res.status === 409) return { ok: false, reason: 'occupied' };
+    if (res.status === 403) {
+      const body = await res.json();
+      return { ok: false, reason: body.status === 'ACCOUNT_INACTIVE' ? 'inactive' : 'unassigned' };
+    }
+    if (!res.ok) return { ok: false, reason: 'error' };
+
+    const body = (await res.json()) as LoginResponse;
+    return {
+      ok: true,
+      session: { ...body.staff, accessToken: body.token },
+      data: body.data
+    };
+  } catch {
+    return { ok: false, reason: 'network' };
+  }
+}
+
+export async function applyLoginData(
+  session: StaffSession,
+  data: SyncData,
+  resetLogs: boolean
+): Promise<void> {
+  await apply({ cafeteria: session.cafeteria_id, gate: session.gate }, data, resetLogs);
+}
+
+export async function logoutStaff(accessToken: string): Promise<boolean> {
+  try {
+    const res = await fetchT(
+      `${API}/auth/logout`,
+      { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` } },
+      15000
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function clearLocalSession(): Promise<void> {
+  if ((await pendingCount()) > 0) throw new Error('Cannot clear local data while scans are unsynced.');
+  const db = await getDb();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('DELETE FROM local_logs');
+    await db.runAsync('DELETE FROM students');
+    await db.runAsync('DELETE FROM meal_windows');
+    await db.runAsync('DELETE FROM weekly_menu');
+    await db.runAsync('DELETE FROM settings');
+  });
+  await SecureStore.deleteItemAsync('staff_session');
+}
+
 export async function pendingCount(): Promise<number> {
   const db = await getDb();
   const r = await db.getFirstAsync<{ n: number }>('SELECT COUNT(*) AS n FROM local_logs WHERE synced = 0');
@@ -70,9 +173,13 @@ export async function pendingCount(): Promise<number> {
 }
 
 /* ---------- download ---------- */
-async function download(cfg: GateConfig): Promise<SyncData | null> {
+async function download(accessToken: string): Promise<SyncData | null> {
   try {
-    const res = await fetchT(`${API}/sync/data?cafeteria=${cfg.cafeteria}&gate=${cfg.gate}`, undefined, 15000);
+    const res = await fetchT(
+      `${API}/sync/data`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+      15000
+    );
     if (!res.ok) return null;
     return (await res.json()) as SyncData;
   } catch {
@@ -118,25 +225,11 @@ async function apply(cfg: GateConfig, d: SyncData, resetLogs: boolean) {
   });
 }
 
-/** First launch or gate change: download this gate's students, then save the gate. */
-export async function setupGate(
-  cfg: GateConfig
-): Promise<{ ok: true; count: number } | { ok: false; reason: 'network' | 'pending' }> {
-  if ((await pendingCount()) > 0) {
-    await syncUp();
-    if ((await pendingCount()) > 0) return { ok: false, reason: 'pending' };
-  }
-  const data = await download(cfg);
-  if (!data) return { ok: false, reason: 'network' };
-  await apply(cfg, data, true);
-  return { ok: true, count: data.students.length };
-}
-
 /** Refresh the local copy for the gate that is already set. */
 export async function syncDown(): Promise<boolean> {
-  const cfg = await getGate();
-  if (!cfg) return false;
-  const data = await download(cfg);
+  const [session, cfg] = await Promise.all([loadSession(), getGate()]);
+  if (!session || !cfg) return false;
+  const data = await download(session.accessToken);
   if (!data) return false;
   await apply(cfg, data, false);
   return true;
@@ -154,8 +247,8 @@ export async function syncDownIfStale(maxAgeMs: number): Promise<boolean> {
 /* ---------- upload offline scans ---------- */
 export async function syncUp(): Promise<boolean> {
   try {
-    const cfg = await getGate();
-    if (!cfg) return false;
+    const session = await loadSession();
+    if (!session) return false;
 
     const db = await getDb();
     const rows = await db.getAllAsync<{
@@ -167,11 +260,12 @@ export async function syncUp(): Promise<boolean> {
       `${API}/sync/scans`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.accessToken}`
+        },
         body: JSON.stringify({
-          cafeteria: cfg.cafeteria,
-          gate: cfg.gate,
-          scans: rows.map((r) => ({
+          scans: rows.map((r: { student_id: any; meal_type: any; meal_date: any; scanned_at: any; method: any; }) => ({
             studentId: r.student_id, mealType: r.meal_type, mealDate: r.meal_date,
             scannedAt: r.scanned_at, method: r.method
           }))
@@ -180,6 +274,8 @@ export async function syncUp(): Promise<boolean> {
       15000
     );
     if (!res.ok) return false;
+    const result = await res.json() as { accepted?: number; skipped?: number };
+    if (result.accepted !== rows.length || result.skipped !== 0) return false;
 
     // mark only the rows that were sent
     await db.withTransactionAsync(async () => {

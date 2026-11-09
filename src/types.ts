@@ -21,6 +21,7 @@ export type ScanStatus =
   | 'NOT_FOUND'
   | 'INACTIVE'
   | 'WRONG_GATE'
+  | 'AUTH_REQUIRED'
   | 'BAD_REQUEST'
   | 'ERROR'
   | 'NETWORK';

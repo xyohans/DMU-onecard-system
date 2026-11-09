@@ -38,7 +38,9 @@
         {
           "cameraPermission": "Allow the app to use the camera to scan meal cards"
         }
-      ]
+      ],
+      "expo-sqlite",
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,

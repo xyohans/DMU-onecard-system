@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#10233f">
+    <title>Meal Card Admin</title>
+    <link rel="stylesheet" href="/admin/styles.css">
+    <script src="/admin/app.js" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <a class="brand" href="/admin/" aria-label="Meal Card Admin home">
+          <span class="brand-mark">M</span>
+          <span><strong>Meal Card</strong><small>Administration</small></span>
+        </a>
+        <div id="admin-info" class="admin-info" hidden>
+          <span id="admin-name"></span>
+          <button id="logout-button" class="button button-quiet" type="button">Sign out</button>
+        </div>
+      </header>
+
+      <section id="login-panel" class="login-panel">
+        <div class="eyebrow">ADMIN ACCESS</div>
+        <h1>Welcome back</h1>
+        <p class="muted">Sign in to manage staff accounts and their assigned stations.</p>
+        <form id="login-form" class="stack">
+          <label>Email
+            <input name="email" type="email" autocomplete="username" maxlength="150" required>
+          </label>
+          <label>Password
+            <input name="password" type="password" autocomplete="current-password" maxlength="200" required>
+          </label>
+          <button class="button button-primary" type="submit">Sign in</button>
+          <p id="login-message" class="message" role="alert"></p>
+        </form>
+      </section>
+
+      <section id="dashboard" hidden>
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">STAFF DIRECTORY</div>
+            <h1>Staff accounts</h1>
+            <p class="muted">Assign each staff member to a cafeteria and gate. Changes to a station end their current session.</p>
+          </div>
+          <button id="refresh-button" class="button button-quiet" type="button">Refresh list</button>
+        </div>
+
+        <div id="dashboard-message" class="notice" role="status" hidden></div>
+
+        <section class="panel create-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>Register staff</h2>
+              <p class="muted">A secure temporary password is generated and shown once.</p>
+            </div>
+          </div>
+          <form id="create-form" class="staff-form">
+            <label>Full name
+              <input name="full_name" autocomplete="name" maxlength="150" required>
+            </label>
+            <label>Email
+              <input name="email" type="email" autocomplete="email" maxlength="150" required>
+            </label>
+            <label>Cafeteria
+              <select name="cafeteria_id" required>
+                <option value="1">Cafeteria 1</option>
+                <option value="2">Cafeteria 2</option>
+              </select>
+            </label>
+            <label>Gate
+              <select name="gate" required></select>
+            </label>
+            <button class="button button-primary" type="submit">Create account</button>
+          </form>
+        </section>
+
+        <section class="staff-section">
+          <div class="section-heading">
+            <h2>Current staff</h2>
+            <span id="staff-count" class="count"></span>
+          </div>
+          <div id="staff-list" class="staff-list" aria-live="polite"></div>
+          <p id="empty-state" class="empty-state" hidden>No staff accounts yet. Use the form above to register the first account.</p>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="password-dialog" class="password-dialog">
+      <div class="eyebrow">ONE-TIME PASSWORD</div>
+      <h2 id="password-title">Share securely</h2>
+      <p class="muted">Copy this password now and give it to the staff member securely. It won’t be shown again.</p>
+      <output id="temporary-password" class="temporary-password"></output>
+      <div class="dialog-actions">
+        <button id="copy-password" class="button button-quiet" type="button">Copy password</button>
+        <button id="close-password" class="button button-primary" type="button">Done</button>
+      </div>
+    </dialog>
+  </body>
+</html>

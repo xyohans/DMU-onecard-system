@@ -1,21 +1,16 @@
 import express from 'express';
 import db from '../models/db.js';
 import { cleanId, getCurrentMeal } from '../models/DB_QUERY.js';
+import { requireStaff } from '../models/auth.js';
 
 const router = express.Router();
 
-router.post('/', async (req, res) => {
+router.post('/', requireStaff, async (req, res) => {
   try {
     const studentId = cleanId(req.body?.studentId);
     if (!studentId) return res.status(400).json({ status: 'BAD_REQUEST' });
     const method = req.body?.method === 'manual' ? 'manual' : 'qr';
-
-    // which cafeteria and gate is this phone set to?
-    const cafeteria = Number(req.body?.cafeteria);
-    const gate = Number(req.body?.gate);
-    if (!Number.isInteger(cafeteria) || !Number.isInteger(gate)) {
-      return res.status(400).json({ status: 'BAD_REQUEST' });
-    }
+    const { cafeteria_id: cafeteria, gate } = req.staff;
 
     // 1. is a meal open?
     const meal = await getCurrentMeal();

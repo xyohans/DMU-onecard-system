@@ -15,6 +15,31 @@ CREATE TABLE students (
   KEY idx_students_gate (cafeteria_id, gate)
 ) ENGINE=InnoDB;
 
+-- STAFF (accounts are provisioned with api/scripts/create-staff.js)
+CREATE TABLE staff (
+  id            INT          NOT NULL AUTO_INCREMENT,
+  email         VARCHAR(150) NOT NULL,
+  full_name     VARCHAR(150) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  role          ENUM('staff','admin') NOT NULL DEFAULT 'staff',
+  cafeteria_id  TINYINT      NULL,
+  gate          TINYINT      NULL,
+  is_active     TINYINT(1)   NOT NULL DEFAULT 1,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_staff_email (email),
+  KEY idx_staff_station (cafeteria_id, gate)
+) ENGINE=InnoDB;
+
+-- A staff account can have only one active phone session.
+CREATE TABLE staff_sessions (
+  staff_id   INT         NOT NULL,
+  token_hash BINARY(32)  NOT NULL,
+  created_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (staff_id),
+  UNIQUE KEY uq_staff_sessions_token (token_hash),
+  CONSTRAINT fk_staff_sessions_staff FOREIGN KEY (staff_id) REFERENCES staff(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- MEAL WINDOWS (daily schedule)
 CREATE TABLE meal_windows (
   meal_type   ENUM('breakfast','lunch','dinner') NOT NULL,

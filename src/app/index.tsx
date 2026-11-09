@@ -16,20 +16,27 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Platform,
   View
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { API, SETUP_PIN } from '../config';
+import { API } from '../config';
 import { fetchT } from '../net';
 import {
+  applyLoginData,
+  authenticateStaff,
+  clearLocalSession,
   getGate,
+  loadSession,
+  logoutStaff,
   pendingCount,
   saveOnlineScan,
+  saveSession,
   scanOffline,
-  setupGate,
   syncDownIfStale,
   syncUp,
-  type GateConfig
+  type StaffSession,
+  type SyncData
 } from '../offline';
 import type { MealType, ScanResult, ScanStatus, StatusResponse } from '../types';
 
@@ -74,6 +81,7 @@ const RESULT_UI: Record<ScanStatus, { color: string; icon: IconName; title: stri
   ALLOWED:      { color: C.ok,   icon: 'checkmark',       title: 'Approved',          sub: 'Enjoy your meal' },
   ALREADY_USED: { color: C.warn, icon: 'hand-left',       title: 'Already used',      sub: 'This meal was already taken today' },
   CLOSED:       { color: C.idle, icon: 'time',            title: 'Cafeteria closed',  sub: 'No meal is being served right now' },
+  AUTH_REQUIRED:{ color: C.bad,  icon: 'lock-closed',     title: 'Sign in required',  sub: 'This staff session is no longer active' },
   NOT_FOUND:    { color: C.bad,  icon: 'close',           title: 'Not found',         sub: 'This student ID does not exist' },
   INACTIVE:     { color: C.bad,  icon: 'ban',             title: 'Not allowed',       sub: 'This student is not active' },
   WRONG_GATE:   { color: C.warn, icon: 'swap-horizontal', title: 'Wrong gate',        sub: 'This student is assigned to another gate' },
@@ -368,102 +376,120 @@ function ManualEntry({
   );
 }
 
-/* ---------- gate setup ---------- */
-const GATES = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-
-function SetupScreen({
-  current,
+/* ---------- staff login ---------- */
+function LoginScreen({
   onDone,
-  onCancel
+  initialError
 }: {
-  current: GateConfig | null;
-  onDone: (c: GateConfig) => void;
-  onCancel?: () => void;
+  onDone: (session: StaffSession) => void;
+  initialError?: string;
 }) {
   const insets = useSafeAreaInsets();
-  const [cafeteria, setCafeteria] = useState(current?.cafeteria ?? 1);
-  const [gate, setGate] = useState(current?.gate ?? 1);
-  const [pin, setPin] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const locked = !!current; // changing an existing gate needs the PIN
+  const [error, setError] = useState(initialError ?? '');
 
-  async function save() {
-    if (locked && pin !== SETUP_PIN) {
-      setError('Wrong PIN');
+  async function login() {
+    if (Platform.OS === 'web') {
+      setError('Staff sign-in is available in the Android and iOS app only.');
       return;
     }
+    if (!email.trim() || !password) {
+      setError('Enter your email and password.');
+      return;
+    }
+
     setBusy(true);
     setError('');
-    const r = await setupGate({ cafeteria, gate });
-    setBusy(false);
+    let issuedToken: string | null = null;
+    try {
+      const result = await authenticateStaff(email.trim(), password);
+      if (!result.ok) {
+        const messages = {
+          network: 'Could not connect. Staff login requires an internet connection to the server.',
+          invalid: 'Email or password is incorrect.',
+          inactive: 'This staff account is inactive. Contact an administrator.',
+          occupied: 'This account is already signed in on another phone.',
+          unassigned: 'This account has no valid cafeteria and gate assignment.',
+          error: 'Could not sign in. Please try again.'
+        };
+        setError(messages[result.reason]);
+        return;
+      }
 
-    if (!r.ok) {
+      issuedToken = result.session.accessToken;
+      const [oldGate, unsent] = await Promise.all([getGate(), pendingCount()]);
+      const sameStation = oldGate?.cafeteria === result.session.cafeteria_id &&
+        oldGate?.gate === result.session.gate;
+      if (unsent > 0 && !sameStation) {
+        const released = await logoutStaff(result.session.accessToken);
+        setError(
+          released
+            ? 'This phone has unsent scans from another gate. Sign in at the original gate to sync them first.'
+            : 'This phone has unsent scans from another gate, and the new session could not be released. Contact an administrator.'
+        );
+        return;
+      }
+
+      await applyLoginData(result.session, result.data, unsent === 0);
+      await saveSession(result.session);
+      onDone(result.session);
+    } catch (err) {
+      const released = issuedToken ? await logoutStaff(issuedToken) : true;
+      const message = err instanceof Error ? err.message : 'Could not save sign-in data. Please try again.';
       setError(
-        r.reason === 'pending'
-          ? 'This phone has scans that are not sent yet. Connect to the server and try again.'
-          : 'Could not download the student list. Connect to the server network and try again.'
+        released
+          ? message
+          : `${message} The server session could not be released; contact an administrator.`
       );
-      return;
+    } finally {
+      setBusy(false);
     }
-    onDone({ cafeteria, gate });
   }
 
   return (
     <KeyboardAvoidingView style={{ flex: 1, backgroundColor: C.bg }} behavior="padding">
       <ScrollView
-        contentContainerStyle={[styles.setup, { paddingTop: insets.top + 30, paddingBottom: insets.bottom + 30 }]}
+        contentContainerStyle={[styles.login, { paddingTop: insets.top + 50, paddingBottom: insets.bottom + 30 }]}
         keyboardShouldPersistTaps="handled"
       >
-        <Text style={styles.appName}>{locked ? 'Change gate' : 'Set up this phone'}</Text>
-        <Text style={styles.setupSub}>
-          Choose where this phone will be used. It downloads only that gate's students.
-        </Text>
+        <Text style={styles.appName}>Meal Card</Text>
+        <Text style={styles.loginSub}>Sign in to load your assigned cafeteria and gate.</Text>
 
-        <Text style={styles.setupLabel}>Cafeteria</Text>
-        <View style={styles.chipRow}>
-          {[1, 2].map((n) => (
-            <TouchableOpacity key={n} style={[styles.chip, cafeteria === n && styles.chipActive]} onPress={() => setCafeteria(n)}>
-              <Text style={[styles.chipText, cafeteria === n && styles.chipTextActive]}>{n}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+        <Text style={styles.loginLabel}>Email</Text>
+        <TextInput
+          style={styles.loginInput}
+          value={email}
+          onChangeText={setEmail}
+          placeholder="staff@example.edu"
+          placeholderTextColor="#64748b"
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="email-address"
+          textContentType="emailAddress"
+          editable={!busy}
+        />
 
-        <Text style={styles.setupLabel}>Gate</Text>
-        <View style={styles.chipRow}>
-          {GATES.map((n) => (
-            <TouchableOpacity key={n} style={[styles.chip, gate === n && styles.chipActive]} onPress={() => setGate(n)}>
-              <Text style={[styles.chipText, gate === n && styles.chipTextActive]}>{n}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {locked && (
-          <>
-            <Text style={styles.setupLabel}>Setup PIN</Text>
-            <TextInput
-              style={styles.pinInput}
-              value={pin}
-              onChangeText={setPin}
-              placeholder="PIN"
-              placeholderTextColor="#64748b"
-              secureTextEntry
-              keyboardType="number-pad"
-            />
-          </>
-        )}
+        <Text style={styles.loginLabel}>Password</Text>
+        <TextInput
+          style={styles.loginInput}
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Password"
+          placeholderTextColor="#64748b"
+          secureTextEntry
+          textContentType="password"
+          returnKeyType="done"
+          onSubmitEditing={login}
+          editable={!busy}
+        />
 
         {!!error && <Text style={styles.errorText}>{error}</Text>}
 
-        <TouchableOpacity style={[styles.saveButton, busy && { opacity: 0.6 }]} onPress={save} disabled={busy}>
-          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveText}>Save and download students</Text>}
+        <TouchableOpacity style={[styles.saveButton, busy && { opacity: 0.6 }]} onPress={login} disabled={busy}>
+          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveText}>Sign in and download data</Text>}
         </TouchableOpacity>
-
-        {onCancel && (
-          <TouchableOpacity style={styles.cancelButton} onPress={onCancel} disabled={busy}>
-            <Text style={styles.cancelText}>Cancel</Text>
-          </TouchableOpacity>
-        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -473,9 +499,11 @@ function SetupScreen({
 export default function App() {
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
-  const [cfg, setCfg] = useState<GateConfig | null>(null);
+  const [session, setSession] = useState<StaffSession | null>(null);
   const [ready, setReady] = useState(false);
-  const [setupOpen, setSetupOpen] = useState(false);
+  const [bootError, setBootError] = useState('');
+  const [logoutError, setLogoutError] = useState('');
+  const [logoutBusy, setLogoutBusy] = useState(false);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [offline, setOffline] = useState(false);
   const [view, setView] = useState<ScanView | null>(null);
@@ -489,13 +517,52 @@ export default function App() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCode = useRef({ id: '', time: 0 });
 
-  // read the saved gate
+  const cfg = session
+    ? { cafeteria: session.cafeteria_id, gate: session.gate }
+    : null;
+
+  // Restore a saved session, checking with the server when it is reachable.
   useEffect(() => {
-    (async () => {
-      setCfg(await getGate());
-      setPending(await pendingCount());
-      setReady(true);
-    })();
+    let alive = true;
+    async function restore() {
+      try {
+        const saved = Platform.OS === 'web' ? null : await loadSession();
+        const localGate = await getGate();
+        if (saved && localGate?.cafeteria === saved.cafeteria_id && localGate.gate === saved.gate) {
+          try {
+            const res = await fetchT(
+              `${API}/auth/session`,
+              { headers: { Authorization: `Bearer ${saved.accessToken}` } },
+              5000
+            );
+            if (res.ok) {
+              const { staff } = await res.json();
+              if (
+                staff.cafeteria_id === saved.cafeteria_id &&
+                staff.gate === saved.gate
+              ) {
+                if (alive) setSession(saved);
+              } else if (alive) {
+                setBootError('Your assigned station changed. Sign in again to download its student list.');
+              }
+            } else if (res.status === 401 || res.status === 403) {
+              if (alive) setBootError('Your staff session is no longer active. Sign in again.');
+            } else if (alive) {
+              setSession(saved);
+            }
+          } catch {
+            if (alive) setSession(saved);
+          }
+        }
+        if (alive) setPending(await pendingCount());
+      } catch (err) {
+        if (alive) setBootError(err instanceof Error ? err.message : 'Could not load saved sign-in data.');
+      } finally {
+        if (alive) setReady(true);
+      }
+    }
+    restore();
+    return () => { alive = false; };
   }, []);
 
   const loadStatus = useCallback(async () => {
@@ -517,7 +584,7 @@ export default function App() {
 
   // every 2 minutes: send unsent scans (free when none), refresh the local copy only if it is older than STALE_MS
   useEffect(() => {
-    if (!cfg) return;
+    if (!session) return;
     let alive = true;
     async function sync() {
       await syncUp();
@@ -530,7 +597,7 @@ export default function App() {
       alive = false;
       clearInterval(t);
     };
-  }, [cfg]);
+  }, [session]);
 
   function closeResult() {
     if (timer.current) clearTimeout(timer.current);
@@ -541,7 +608,7 @@ export default function App() {
 
   async function submit(rawId: string, method: 'qr' | 'manual') {
     const id = rawId.trim();
-    if (!id || busy.current || !cfg) return;
+    if (!id || busy.current || !cfg || logoutBusy || !session) return;
 
     // the camera fires repeatedly, ignore the same code for a few seconds
     const now = Date.now();
@@ -558,13 +625,22 @@ export default function App() {
         `${API}/scan`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ studentId: id, method, cafeteria: cfg.cafeteria, gate: cfg.gate })
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.accessToken}`
+          },
+          body: JSON.stringify({ studentId: id, method })
         },
         REQUEST_TIMEOUT_MS
       );
-      data = (await res.json()) as ScanResult;
-      if (data.status === 'ERROR') throw new Error('server error'); // server up but broken: use the phone's copy
+      const response = (await res.json()) as ScanResult;
+      if (res.status === 401) {
+        data = { status: 'AUTH_REQUIRED' };
+        setSession(null);
+      } else {
+        data = response;
+        if (data.status === 'ERROR') throw new Error('server error'); // server up but broken: use the phone's copy
+      }
     } catch {
       viaServer = false;
       data = await scanOffline(id, method);
@@ -609,23 +685,53 @@ export default function App() {
     submit(id, 'manual');
   }
 
-  if (!ready || !permission) return <View style={styles.container} />;
+  if (!ready) return <View style={styles.container} />;
 
-  // first launch (or long-press on the gate label): choose the gate
-  if (!cfg || setupOpen) {
+  if (!session || !cfg) {
     return (
-      <SetupScreen
-        current={cfg}
-        onDone={(c) => {
-          setCfg(c);
-          setSetupOpen(false);
+      <LoginScreen
+        initialError={bootError}
+        onDone={(signedIn) => {
+          setBootError('');
+          setLogoutError('');
+          setSession(signedIn);
+          pendingCount().then(setPending);
         }}
-        onCancel={cfg ? () => setSetupOpen(false) : undefined}
       />
     );
   }
+  if (!permission) return <View style={styles.container} />;
 
-  const paused = !!view || checking || manualOpen;
+  async function signOut() {
+    if (logoutBusy || !session) return;
+    if (busy.current || checking || manualOpen || view) {
+      setLogoutError('Finish or close the current scan before logging out.');
+      return;
+    }
+    setLogoutBusy(true);
+    setLogoutError('');
+    try {
+      const synced = await syncUp();
+      const remaining = await pendingCount();
+      if (!synced || remaining > 0) {
+        setLogoutError(`${remaining} scan${remaining === 1 ? '' : 's'} still need to sync. Stay signed in and try again online.`);
+        return;
+      }
+      if (!(await logoutStaff(session.accessToken))) {
+        setLogoutError('Could not reach the server to log out. You are still signed in.');
+        return;
+      }
+      setSession(null);
+      await clearLocalSession();
+      setPending(0);
+    } catch (err) {
+      setLogoutError(err instanceof Error ? err.message : 'Could not complete logout.');
+    } finally {
+      setLogoutBusy(false);
+    }
+  }
+
+  const paused = !!view || checking || manualOpen || logoutBusy;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 12 }]}>
@@ -635,18 +741,28 @@ export default function App() {
       <View style={styles.header}>
         <View>
           <Text style={styles.appName}>Meal Card</Text>
-          <Pressable onLongPress={() => setSetupOpen(true)}>
-            <Text style={styles.appSub}>Cafeteria {cfg.cafeteria} · Gate {cfg.gate}</Text>
-          </Pressable>
+          <Text style={styles.appSub}>Cafeteria {cfg.cafeteria} · Gate {cfg.gate}</Text>
         </View>
-        <View style={styles.counter}>
-          <Ionicons name="people-outline" size={16} color={C.muted} />
-          <Text style={styles.counterText}>
-            {served} served{pending > 0 ? ` · ${pending} unsent` : ''}
-          </Text>
+        <View style={styles.headerActions}>
+          <View style={styles.counter}>
+            <Ionicons name="people-outline" size={16} color={C.muted} />
+            <Text style={styles.counterText}>
+              {served} served{pending > 0 ? ` · ${pending} unsent` : ''}
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={signOut}
+            disabled={logoutBusy || checking || manualOpen || !!view}
+            style={styles.logoutButton}
+          >
+            {logoutBusy
+              ? <ActivityIndicator size="small" color={C.text} />
+              : <Text style={styles.logoutText}>Log out</Text>}
+          </TouchableOpacity>
         </View>
       </View>
 
+      {!!logoutError && <Text style={styles.errorText}>{logoutError}</Text>}
       <StatusCard status={status} offline={offline} onRetry={loadStatus} />
 
       {/* camera */}
@@ -700,11 +816,17 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
   appName: { color: C.text, fontSize: 22, fontWeight: '800' },
   appSub: { color: C.muted, fontSize: 13, marginTop: 1 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   counter: {
     flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.card,
     borderWidth: 1, borderColor: C.border, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20
   },
   counterText: { color: C.text, fontSize: 13, fontWeight: '600' },
+  logoutButton: {
+    minWidth: 58, height: 38, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: C.border, borderRadius: 12, paddingHorizontal: 10
+  },
+  logoutText: { color: C.text, fontSize: 13, fontWeight: '700' },
 
   statusCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: C.card,
@@ -778,21 +900,13 @@ const styles = StyleSheet.create({
   sheetPrimary: { backgroundColor: C.primary },
   sheetPrimaryText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 
-  /* setup */
-  setup: { paddingHorizontal: 20 },
-  setupSub: { color: C.muted, fontSize: 14, marginTop: 6, marginBottom: 8 },
-  setupLabel: { color: C.text, fontSize: 15, fontWeight: '700', marginTop: 22, marginBottom: 10 },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  chip: {
-    width: 52, height: 52, borderRadius: 14, alignItems: 'center', justifyContent: 'center',
-    backgroundColor: C.card, borderWidth: 1, borderColor: C.border
-  },
-  chipActive: { backgroundColor: C.primary, borderColor: C.primary },
-  chipText: { color: C.text, fontSize: 18, fontWeight: '700' },
-  chipTextActive: { color: '#fff' },
-  pinInput: {
+  /* login */
+  login: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 20 },
+  loginSub: { color: C.muted, fontSize: 14, marginTop: 6, marginBottom: 20 },
+  loginLabel: { color: C.text, fontSize: 15, fontWeight: '700', marginTop: 18, marginBottom: 8 },
+  loginInput: {
     backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 14,
-    color: C.text, fontSize: 20, paddingHorizontal: 16, paddingVertical: 14, letterSpacing: 4
+    color: C.text, fontSize: 17, paddingHorizontal: 16, paddingVertical: 14
   },
   errorText: { color: '#fca5a5', fontSize: 14, marginTop: 16 },
   saveButton: {
@@ -800,8 +914,6 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center'
   },
   saveText: { color: '#fff', fontSize: 17, fontWeight: '800' },
-  cancelButton: { marginTop: 12, alignItems: 'center', paddingVertical: 14 },
-  cancelText: { color: C.muted, fontSize: 16, fontWeight: '600' },
 
   /* result */
   overlay: {
